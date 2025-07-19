@@ -1,16 +1,25 @@
-from asyncio import PriorityQueue
 import asyncio
+from queue import PriorityQueue, Empty
 import itertools
-from sqlmodel import SQLModel, create_engine, Session
+from sqlmodel import SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from pydantic import BaseModel
 from typing import Optional
+
+#Constants
+PRIORITY_LEVELS = {
+            "high":0,
+            "mid":5,
+            "low":10,
+        }
 
 # Pydantic backed model used for validation of request
 class JobRequest(BaseModel):
     name:str
     command: str
     params: Optional[str] = None
-    priority: Optional[str] = "medium"
+    priority: Optional[str] = "med"
     timeout: Optional[int] = 60
     retries: Optional[int] = 0
     logs: Optional[bool] = False
@@ -20,11 +29,20 @@ class Job:
     def __init__(self, job_id: str, request: JobRequest):
         self.name = request.name
         self.job_id = job_id
-        self.command = request.command
+        if request.command.strip() == "": 
+            raise ValueError("Illegal Argument The command cannot be a empty string")
+        else:
+            self.command = request.command
         self.params = request.params
-        self.priority = request.priority
+        if request.priority in PRIORITY_LEVELS.keys():
+            self.priority = request.priority
+        else:
+            raise ValueError("Illegal Argument passed as priority must be low, mid or high")
         self.timeout = request.timeout
-        self.retries = request.retries
+        if request.retries != None and request.retries >= 0:
+            self.retries = request.retries
+        else:
+            raise ValueError(f"Illegal Argument passed in retries , must be greater than 0 , passed {request.retries}")
         self.logs = request.logs
         self.status = "queued"
         self.result = None
@@ -39,19 +57,14 @@ class Queue:
         self.retry_queue=PriorityQueue()
 
         self.counter = itertools.count()
-        self.PRIORITY_LEVELS = {
-            "high":0,
-            "mid":5,
-            "low":10,
-        }
+        
 
-    async def enqueue_job(self, job:Job, priority, mutex:asyncio.Lock):
+    async def enqueue_job(self, job:Job, priority, mutex:asyncio.Lock) -> None:
         await mutex.acquire()
-        #Aquire mutex for buffer write event
+        #Aquire mutex for save buffer write
         try:
-            if priority not in ["low", "mid","high"]:
-                raise ValueError(f"Invalid priority: {priority}. Must be 'low', 'mid', or 'high'.")
-            await self.main_queue.put((self.PRIORITY_LEVELS[priority], next(self.counter), job))
+            #TODO: Deal with queue.put(block)
+            self.main_queue.put((PRIORITY_LEVELS[priority], next(self.counter), job))
             print(f"[DEBUG] Item {job} enqueued with priority:{priority}")
         finally:
             mutex.release()
@@ -60,21 +73,30 @@ class Queue:
     def process_job(self, job):
         #Dispatch Jobs to remote instance from here
         pass
-    def dequeue_job(self, ):
+
+
+    async def dequeue_job(self, mutex:asyncio.Lock) -> Job | None:
         #Atomic thread safe dequeue
-        pass
+        await mutex.acquire()
+        #Aquire mutex for safe dequeue 
+        try:
+            job_instance=self.main_queue.get(block=False)
+        except Empty:
+            print(f"[INFO] Skipping Dequeue operation (Underflow)")
+            job_instance=None 
+        finally:
+            mutex.release()
+        return job_instance
 
-
-
-DATABASE_URL = "sqlite:///jobs.db"
-engine = create_engine(DATABASE_URL, echo=False)
 
 #Depedency Creation
-def init_db() -> Session:
+async def init_db() -> AsyncSession:
     # Initializes the SQLite database and returns a session.
     # Only DBWorker shall this session.
-    SQLModel.metadata.create_all(engine)
-    session = Session(engine)
-    print("[DB] Initialized and session created")
+    DATABASE_URL = "sqlite+aiosqlite:///jobs.db"  
+    engine:AsyncEngine = create_async_engine(DATABASE_URL, echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    session = AsyncSession(engine)
+    print("[DB] Initialized and async session created")
     return session
-
