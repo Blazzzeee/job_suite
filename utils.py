@@ -1,4 +1,5 @@
-from queue import PriorityQueue
+from asyncio import PriorityQueue
+import asyncio
 import itertools
 from sqlmodel import SQLModel, create_engine, Session
 from pydantic import BaseModel
@@ -44,12 +45,17 @@ class Queue:
             "low":10,
         }
 
-    def enqueue_job(self, job:Job, priority):
+    async def enqueue_job(self, job:Job, priority, mutex:asyncio.Lock):
+        await mutex.acquire()
         #Aquire mutex for buffer write event
-        if priority not in ["low", "mid","high"]:
-            raise ValueError(f"Invalid priority: {priority}. Must be 'low', 'mid', or 'high'.")
-        self.main_queue.put((self.PRIORITY_LEVELS[priority], next(self.counter), job))
-        print(f"[DEBUG] Item {job} enqueued with priority:{priority}")
+        try:
+            if priority not in ["low", "mid","high"]:
+                raise ValueError(f"Invalid priority: {priority}. Must be 'low', 'mid', or 'high'.")
+            await self.main_queue.put((self.PRIORITY_LEVELS[priority], next(self.counter), job))
+            print(f"[DEBUG] Item {job} enqueued with priority:{priority}")
+        finally:
+            mutex.release()
+
     # Simulated job runner
     def process_job(self, job):
         #Dispatch Jobs to remote instance from here

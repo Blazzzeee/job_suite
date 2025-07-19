@@ -4,29 +4,14 @@ import uvicorn
 import utils 
 import models
 import db
+import asyncio
 
 app = FastAPI()
 
 MAX_RETRIES = 10
 
 queue = utils.Queue()
-
-# Actual job representation
-class Job:
-    def __init__(self, job_id: str, request: utils.JobRequest):
-        self.name = request.name
-        self.job_id = job_id
-        self.command = request.command
-        self.params = request.params
-        self.priority = request.priority
-        self.timeout = request.timeout
-        self.retries = request.retries
-        self.logs = request.logs
-        self.status = "queued"
-        self.result = None
-
-    def __repr__(self):
-        return f"<Job {self.job_id}: {self.command}>"
+queue_mutex = asyncio.Lock()
 
 # # TEMP: Simulate db  REPLACED
 jobs = {}
@@ -47,8 +32,8 @@ async def post_job(job: utils.JobRequest):
         )
 
     try:
-        queue.enqueue_job(job_instance, job_instance.priority) 
-        db_worker.add_job(db_job_instance)
+        await queue.enqueue_job(job_instance, job_instance.priority,queue_mutex) 
+        await db_worker.add_job(db_job_instance)
     except ValueError as e:
         print(f"[DEBUG]Cannot enqueue job .. skipping ... {e}")
     except Exception as e:
@@ -133,8 +118,8 @@ async def get_logs(job_id: str):
 # Enqueue a job into the priority queue
 if __name__ == "__main__":
     session = utils.init_db()
-    db_worker = db.DBWorker(session=session)
-    db_worker.start()
+    db_worker = db.AsyncDBWorker(session=session)
+    asyncio.create_task(db_worker.run())
     print(f"[INFO] Initialised Database worker thread for persistent storage")
     
     print("[INFO] Starting FastAPI app inside a thread...")
