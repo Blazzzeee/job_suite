@@ -8,17 +8,43 @@ import db
 import asyncio
 
 db_worker = None
+remote_workers = []
+queue = None
+queue_mutex=None
+dispatcher = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db_worker
-
+    global db_worker,remote_workers, queue ,queue_mutex,dispatcher
     # STARTUP
+
+    #In memory task queue (PriorityQueue)
+    queue = utils.JobQueue()
+    queue_mutex = asyncio.Lock()
+
+    #Depedency creation
     session = await utils.init_db()
+    #The db worker is responsible for all operations involving database updates
     db_worker = db.AsyncDBWorker(session=session)
+    #The worker task is actual async task , in which db_worker operations are executed from
     worker_task = asyncio.create_task(db_worker.run())
     print("[INFO] Database worker started")
+
+    #This routine connects to all remote instances that are defined in an env file and return successfull connections in a list
+    connections = await utils.connect_remote_instances()
+
+    #A wrapper class to manage mutex for tasks , connection state , tasks alloted and more
+    for conn in connections:
+        try:
+            remote_conn=utils.RemoteWorkerConnection(conn)
+            remote_workers.append(remote_conn) 
+        except Exception as e:
+            print(e)
+
+    #The dispatcher performs dequeues and allots task to remote instances 
+    dispatcher=utils.JobDispatcher(job_queue=queue, workers=remote_workers, mutex=queue_mutex)
+    dispatcher_task = asyncio.create_task(dispatcher.dispatch_loop())
 
     yield 
 
@@ -27,15 +53,22 @@ async def lifespan(app: FastAPI):
         await db_worker.stop()
         print("[INFO] Database worker stopped")
     worker_task.cancel()
+    for worker in remote_workers:
+        try:
+            await worker.close()
+            print("[INFO] Disconnected from remote worker")
+        except Exception as e:
+            print(f"[WARN] Failed to close remote connection: {e}")
+
+    dispatcher.stop()
+    print(f"[INFO] Stopping dispatcher")
+    await asyncio.sleep(0.3) 
 
 
 app = FastAPI(lifespan=lifespan)
 
-
 MAX_RETRIES = 10
 
-queue = utils.Queue()
-queue_mutex = asyncio.Lock()
 
 # # TEMP: Simulate db  REPLACED
 jobs = {}
@@ -60,8 +93,9 @@ async def post_job(job: utils.JobRequest):
         raise HTTPException(status_code=400, detail="Invalid argument (invalid request payload)") 
 
     try:
-        await queue.enqueue_job(job_instance, job_instance.priority,queue_mutex) 
-        await db_worker.add_job(db_job_instance)
+        if queue!=None and db_worker!=None and queue_mutex!=None:
+            await queue.enqueue_job(job_instance, job_instance.priority,queue_mutex) 
+            await db_worker.add_job(db_job_instance)
     except ValueError as e:
         print(f"[DEBUG]Cannot enqueue job .. skipping ... {e}")
     except Exception as e:
