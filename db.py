@@ -1,11 +1,13 @@
 import asyncio
 from sqlmodel.ext.asyncio.session import AsyncSession
 from models import Job
-
+from sqlmodel import select
+from typing import List
 
 class AsyncDBWorker:
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession, mutex: asyncio.Lock):
         self.session = session
+        self.mutex = mutex
         self.task_queue: asyncio.Queue = asyncio.Queue()
         self._running = False
 
@@ -29,28 +31,43 @@ class AsyncDBWorker:
                 elif action == "stop":
                     print("[AsyncDBWorker] Received stop signal.")
                     break
+                
+
             except Exception as e:
                 print(f"[AsyncDBWorker] Error during DB operation: {e}")
 
         print("[AsyncDBWorker] Worker stopping.")
 
     async def add_job(self, job: Job):
-        print(f"[AsyncDBWorker] Queuing job for ADD: {job}")
-        await self.task_queue.put(("add", job))
+        await self.mutex.acquire()
+        try:
+            print(f"[AsyncDBWorker] Queuing job for ADD: {job}")
+            await self.task_queue.put(("add", job))
+        finally:
+            self.mutex.release()
 
     async def update_job(self, job: Job):
-        print(f"[AsyncDBWorker] Queuing job for UPDATE: {job}")
-        await self.task_queue.put(("update", job))
+        await self.mutex.acquire()
+        try:
+            print(f"[AsyncDBWorker] Queuing job for UPDATE: {job}")
+            await self.task_queue.put(("update", job))
+        finally:
+            self.mutex.release()
 
     async def get_job_by_id(self, job_id: str) -> Job | None:
-        try:
-            job = await self.session.get(Job, job_id)
-            return job
-        except Exception as e:
-            print(f"[AsyncDBWorker] Error fetching job {job_id}: {e}")
-            return None
+            async with self.mutex:
+                stmt = select(Job).where(Job.job_id == job_id)
+                result = await self.session.exec(stmt)
+                return result.first()
+
+    async def get_all_jobs(self) -> List[Job]:
+        # Return all jobs in the DB            async with self.mutex:
+        async with self.mutex:
+                stmt = select(Job)
+                result = await self.session.exec(stmt)
+                return result.all()
 
     async def stop(self):
         print("[AsyncDBWorker] Stop signal received.")
         self._running = False
-        await self.task_queue.put(("stop", None)) 
+        await self.task_queue.put(("stop", None))
