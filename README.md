@@ -130,4 +130,23 @@ Every updation to JobQueue is also updated in the database , the Job class and d
 
 Sync mechanism -> usage of a mutex lock that serves as access to physical database file reads and writes , additonaly we must ensure the atomicity for these operations to prevent concurrent , out of order writes , etc
 
-## Solution used -> AyncDBWorker class (present in db.py)
+## Solution used (Solution 4)-> AyncDBWorker class (present in db.py)
+
+# RemoteInstances
+
+
+
+# CLI usage 
+Usage: cli.py [OPTIONS] COMMAND [ARGS]...
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ --install-completion          Install completion for the current shell.                                                                        │
+│ --show-completion             Show completion for the current shell, to copy it or customize the installation.                                 │
+│ --help                        Show this message and exit.                                                                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ submit   Submit a new job to the scheduler.                                                                                                    │
+│ status   Get the status of a specific job.                                                                                                     │
+│ list     List all jobs.                                                                                                                        │
+│ cancel   Cancel a job by ID.                                                                                                                   │
+│ logs     Stream real-time logs for a specific job using WebSocket
