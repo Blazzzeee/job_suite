@@ -92,6 +92,8 @@ So, while the GIL means we don't get true parallelism for CPU-bound tasks, it's 
 ---
 
 # Scheduler
+Implemeted via JobQueue
+Note this is only an in memory represntation and does not provide data to user in any form , it is only used for faster access to Scheduler API
 
 The task scheduler is responsible for every operation that involves any form of queue interaction , such as incoming job , job dispatch etc
 
@@ -105,3 +107,27 @@ our previous enqueue takes place again , and completes , then the 2nd request co
 Usage of a mutex_lock , the queue mutex shall be locked via each enqueue and dequeue to ensure that these operations are atomic , altho 
 another request can break atomicity for this operation , but this request if it causes a race condition would certainly use our JobQueue api
 then this mutex shall lock the other request operation to safeguard our JobQueue
+
+
+# Database Worker
+
+Consider the case where the dispatcher after dispatching job interrupts , or the server or the JobQueue crashes due to some unhandled 
+exception , but since up till now we are only storing jobs in memory this introduces need for data persistance , then some proposed solutions to handle this are
+
+## Solution 1
+Abandon usage of JobQueue , and use database for all operations , this unifies the data logic as being completely dependent on datbase 
+however , we are not discussing how the db will be Implemeted in this solution , but every operation require interaction of the DBWorker and ffile write operations for DB require DB State synchronization along with added kernel intervention for reading and writing onto DB file , this will completely slow up the queue api which should be exposed as a Scheduler 
+## Solution 2
+Usage of a database as a backup for addtional information of JobQueue member Job ,this is initally thought of as a routine that after some 
+DATBASE_DELAY writes the new state of our queue to database , then we must use this database for the sake of backup only as it becomes unusable for sharing information among other threads , routines and co-routines , since the data is currently unrelibale due to the fact any change 
+could have occurred in that delay duration . Like serving the user a GET request for /jobs/{job_id} , then we dont know for sure if that job has changed its state or not. , but this solves the problem of data persistance
+## Solution 3
+Usage of database for IPC , as mentioned we need some sort of socket to communicate to the remote instance , then the database can be hosted
+remotly , and the Scheduler , JobQueue , Dispatcher and remote instance program all would need to contact the DB for operations , this introduces a significant delay for the these operations compared to something local , even tho some of it can be avoided using appropriate async 
+handling , but the Client side would need some mechanism to notified to fetch from db , this makes the design more complex and well be as fastas the datbase is , which is always slower than local storage , but this will solve a lot of issues
+## Solution 4 
+Every updation to JobQueue is also updated in the database , the Job class and database model Job should be completely compatible and we shall use sqlite with an async engine to ensure that none of these operations block the server , since we are not making seperate threads for eacg component , then this database should expose an async API for db operations to the model model.Job and since the order of these operations is chosen to be async , some form of synchronization mechanism is required . 
+
+Sync mechanism -> usage of a mutex lock that serves as access to physical database file reads and writes , additonaly we must ensure the atomicity for these operations to prevent concurrent , out of order writes , etc
+
+## Solution used -> AyncDBWorker class (present in db.py)
