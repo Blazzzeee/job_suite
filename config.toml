@@ -1,0 +1,19 @@
+# Default values for job submission
+
+# A default name for the job, if none is provided
+name = "default-job"
+
+# Command-line parameters to be passed (optional)
+params = ""
+
+# Priority: can be "low", "med", or "high"
+priority = "mid"
+
+# Timeout in seconds
+timeout = 60
+
+# Number of retries in case of failure
+retries = 0
+
+# Whether logs should be captured
+logs = false 
