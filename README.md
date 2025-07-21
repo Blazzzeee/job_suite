@@ -137,16 +137,4 @@ Sync mechanism -> usage of a mutex lock that serves as access to physical databa
 
 
 # CLI usage 
-Usage: cli.py [OPTIONS] COMMAND [ARGS]...
-
-╭─ Options ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ --install-completion          Install completion for the current shell.                                                                        │
-│ --show-completion             Show completion for the current shell, to copy it or customize the installation.                                 │
-│ --help                        Show this message and exit.                                                                                      │
-╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ submit   Submit a new job to the scheduler.                                                                                                    │
-│ status   Get the status of a specific job.                                                                                                     │
-│ list     List all jobs.                                                                                                                        │
-│ cancel   Cancel a job by ID.                                                                                                                   │
-│ logs     Stream real-time logs for a specific job using WebSocket
+<pre lang="md"> ```bash Usage: cli.py [OPTIONS] COMMAND [ARGS]... ``` ### Options ``` --install-completion Install completion for the current shell. --show-completion Show completion for the current shell, to copy it or customize the installation. --help Show this message and exit. ``` ### Commands ``` submit Submit a new job to the scheduler. status Get the status of a specific job. list List all jobs. cancel Cancel a job by ID. logs Stream real-time logs for a specific job using WebSocket. ``` </pre>
