@@ -93,9 +93,11 @@ So, while the GIL means we don't get true parallelism for CPU-bound tasks, it's 
 
 # Scheduler
 
+The task scheduler is responsible for every operation that involves any form of queue interaction , such as incoming job , job dispatch etc
+
 The task scheduler should expose an API to enqueue and dequeue jobs as a Priority Queue as well as perform this in an async manner to not block the Server , and other parts .
 The async behaviour of scheduler adds a race condition , consider a case when a user does a POST , our post {job_id} controller should be
-responsible for the enqueue , and passes an async coroutine enqueue_job , but before that operation could finish another reequest arrives 
+responsible for the enqueue , and call an async coroutine enqueue_job , but before that operation could finish another reequest arrives 
 assuming the CPU was doing a expensive operation like a memory lookup like PriorityQueue field , then it is almost certain that the contoller would get CPU access , then if the another POST by user leads to a similar enqueue and then it again goes into poll for memory lookup and 
 our previous enqueue takes place again , and completes , then the 2nd request completes the first request buffer write is lost
 
