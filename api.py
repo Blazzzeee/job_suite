@@ -12,6 +12,7 @@ remote_workers = []
 queue = None
 queue_mutex=None
 dispatcher = None
+db_mutex = None
 
 
 @asynccontextmanager
@@ -20,13 +21,16 @@ async def lifespan(app: FastAPI):
     # STARTUP
 
     #In memory task queue (PriorityQueue)
-    queue = utils.JobQueue()
     queue_mutex = asyncio.Lock()
+    queue = utils.JobQueue(queue_mutex)
 
     #Depedency creation
     session = await utils.init_db()
+    
+    #The db_mutex safeguards all writes to database file and is used in every read/write operation involving db
+    db_mutex = asyncio.Lock()
     #The db worker is responsible for all operations involving database updates
-    db_worker = db.AsyncDBWorker(session=session)
+    db_worker = db.AsyncDBWorker(session=session, mutex=db_mutex)
     #The worker task is actual async task , in which db_worker operations are executed from
     worker_task = asyncio.create_task(db_worker.run())
     print("[INFO] Database worker started")
@@ -43,19 +47,22 @@ async def lifespan(app: FastAPI):
             print(e)
 
     #The dispatcher performs dequeues and allots task to remote instances 
-    dispatcher=utils.JobDispatcher(job_queue=queue, workers=remote_workers, mutex=queue_mutex)
+    dispatcher=utils.JobDispatcher(job_queue=queue, workers=remote_workers, db_worker=db_worker)
     dispatcher_task = asyncio.create_task(dispatcher.dispatch_loop())
 
     yield 
 
     # SHUTDOWN
     if db_worker:
+        #terminate database worker
         await db_worker.stop()
         print("[INFO] Database worker stopped")
+    #Terminate asuny task for db_wroker
     worker_task.cancel()
     for worker in remote_workers:
         try:
             await worker.close()
+            #Nicely free up remote workers
             print("[INFO] Disconnected from remote worker")
         except Exception as e:
             print(f"[WARN] Failed to close remote connection: {e}")
@@ -76,11 +83,15 @@ jobs = {}
 # Submit a job for execution
 @app.post("/jobs/", status_code=201)
 async def post_job(job: utils.JobRequest):
+    #Unique refernce used for cross mapping of memory and database
     job_id = str(uuid.uuid4())
+    #The job instance is the in memory validated job_request
     job_instance = utils.Job(job_id, job)
 
     try: 
+        #job_db_instance is the Job model used for persitent storage
         db_job_instance = models.Job(
+                job_id=str(job_id),
                 name=job.name,
                 command=job.command,
                 params=job.params,
@@ -89,13 +100,15 @@ async def post_job(job: utils.JobRequest):
                 status="queued",
             )
     except Exception as e:
+        #Occurs if any field is invalid
         print(f"Recived invalid request {e}")
         raise HTTPException(status_code=400, detail="Invalid argument (invalid request payload)") 
 
     try:
         if queue!=None and db_worker!=None and queue_mutex!=None:
-            await queue.enqueue_job(job_instance, job_instance.priority,queue_mutex) 
+            #thread safe | async safe enqueu with mutexes
             await db_worker.add_job(db_job_instance)
+            await queue.enqueue_job(job_instance, job_instance.priority)
     except ValueError as e:
         print(f"[DEBUG]Cannot enqueue job .. skipping ... {e}")
     except Exception as e:
@@ -120,30 +133,41 @@ async def get_job(job_id: str):
             raise HTTPException(status_code=404, detail="Job not found")
 
         return {
-            "job_id": job.id,
+            "job_id": job.job_id,
             "command": job.command,
             "params": job.params,
             "priority": job.priority,
             "timeout": job.timeout,
             "status": job.status,
-            "result": job.result
+            "result": job.result,
+            "started_at":job.started_at,
+            "finished_at": job.finished_at
         }
 
 # Get list of all running jobs
 @app.get("/jobs/")
 async def list_jobs():
-    return {
-        "jobs": [
-            {
-                "job_id": j.job_id,
-                "command": j.command,
-                "priority": j.priority,
-                "status": j.status
-            }
-            for j in jobs.values()
-        ]
-    }
+    if db_worker!=None:
+        jobs = await db_worker.get_all_jobs()
+        
+        response=list()
+        for job in jobs:
+            temp = {
+            "job_id": job.job_id,
+            "command": job.command,
+            "params": job.params,
+            "priority": job.priority,
+            "timeout": job.timeout,
+            "status": job.status,
+            "result": job.result,
+            "started_at":job.started_at,
+            "finished_at": job.finished_at
+        }
+            response.append(job)
 
+        return response
+
+    
 # Cancel a running job
 @app.delete("/jobs/{job_id}")
 async def delete_job(job_id: str):
