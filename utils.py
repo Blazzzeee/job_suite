@@ -9,25 +9,24 @@ from pydantic import BaseModel
 from typing import Optional
 from environs import env
 import json
+import db
+import datetime
 
+
+#Constants
 MAX_COMMANDS = 5
-
 env.read_env()
-
 raw_instances=env.str("REMOTE_INSTANCES")
-
 try:
     REMOTE_INSTANCES: list[dict] = json.loads(raw_instances)
 except json.JSONDecodeError as e:
     print(f"Could not interpret remote instances check your .env file properly {e}")
-
-
-#Constants
 PRIORITY_LEVELS = {
             "high":0,
             "mid":5,
             "low":10,
         }
+DISPATCH_INTERVAL=1
 
 # Pydantic backed model used for validation of request
 class JobRequest(BaseModel):
@@ -39,7 +38,7 @@ class JobRequest(BaseModel):
     retries: Optional[int] = 0
     logs: Optional[bool] = False
 
-# Actual job representation
+# Actual job representation in-memory
 class Job:
     def __init__(self, job_id: str, request: JobRequest):
         self.name = request.name
@@ -67,23 +66,27 @@ class Job:
 
 
 class JobQueue:
-    def __init__(self) :
+    #The job queue is an async safe queue used (in-memory) for enqueue and deuque operations 
+    #The dispatcher has depedency upon this queue to get what task to execute
+    def __init__(self, mutex:asyncio.Lock) :
         self.main_queue=PriorityQueue()
         #TODO retry_queue
         self.retry_queue=PriorityQueue()
         self.counter = itertools.count()
-        
+        self.mutex = mutex 
 
-    async def enqueue_job(self, job: Job, priority: str, mutex: asyncio.Lock) -> None:
-        await mutex.acquire()
+    async def enqueue_job(self, job: Job, priority: str) -> None:
+        #this ensures the job is queued without any race conditons
+        await self.mutex.acquire()
         try:
             await self.main_queue.put((PRIORITY_LEVELS[priority], next(self.counter), job))
             print(f"[DEBUG] Item {job} enqueued with priority: {priority}")
         finally:
-            mutex.release()
+            self.mutex.release()
 
-    async def dequeue_job(self, mutex: asyncio.Lock) -> Job | None:
-        await mutex.acquire()
+    async def dequeue_job(self) -> Job | None:
+        #this ensures job is dequeued without any race conditons
+        await self.mutex.acquire()
         try:
             job_instance = await asyncio.wait_for(self.main_queue.get(), timeout=1)
             return job_instance
@@ -91,7 +94,7 @@ class JobQueue:
             print(f"[Queue Empty] {e}")
             return None
         finally:
-            mutex.release()
+            self.mutex.release()
 
 #Depedency Creation
 async def init_db() -> AsyncSession:
@@ -106,13 +109,9 @@ async def init_db() -> AsyncSession:
     return session
 
 
-#Connect to remote instances
 
-# REMOTE_INSTANCES = [
-#     {"host": "localhost", "user": "blazzee", "password": "blazzee@12", "port":2222},
-# ]
-#
 async def connect_instance(instance):
+    #This method initiates a ssh connection to a remote instance specified as {instance}
     try:
         conn = await asyncssh.connect(
             host=instance["host"],
@@ -121,19 +120,21 @@ async def connect_instance(instance):
             password=instance.get("password"),  
             known_hosts=None,
         )
-        print(f"Connected to {instance['host']}")
+        print(f"[INSTANCE] Connected to {instance['host']}")
         return conn
     except Exception as e:
-        print(f"Failed to connect to {instance['host']}: {e}")
+        print(f"[INSTANCE] Failed to connect to {instance['host']}: {e}")
         return None
 
 async def connect_remote_instances():
+    #Goes over all remote instances defined in global REMOTE_INSTANCES
     tasks = [connect_instance(i) for i in REMOTE_INSTANCES]
     connections = await asyncio.gather(*tasks)
     return [conn for conn in connections if conn is not None]
 
 
 class RemoteWorkerConnection:
+    #This is a wrapper class around a ssh connection to add extra functionality like running commands , keeping track of command , upper bund on commands and a alive state
     def __init__(self, conn: asyncssh.SSHClientConnection):
         self.conn = conn
         self.max_commands = MAX_COMMANDS
@@ -143,6 +144,7 @@ class RemoteWorkerConnection:
         print(f"[INFO] Conneceted to remote worker")
 
     async def run_command(self, cmd: str, on_line=None, capture_output: bool = True):
+        #This command is used by Dispatcher to dispatch shell compatible commands, it allows access to real time logs via WebSocket
         async with self.lock:
             if not self.is_alive():
                 raise RuntimeError("Connection is dead")
@@ -152,7 +154,6 @@ class RemoteWorkerConnection:
         try:
             process = await self.conn.create_process(cmd)
             if not capture_output:
-                # Return the process to the caller for full control
                 return " "
             output = ""
             async for line in process.stdout:
@@ -185,48 +186,80 @@ class RemoteWorkerConnection:
 
 
 class JobDispatcher:
-    def __init__(self, job_queue: JobQueue, workers: list[RemoteWorkerConnection], mutex: asyncio.Lock):
+    #The Job dispatcher is responsible for all dispatches to remote workers , the job dispatcher actively monitor the job queue(in-memory)
+    #If there jobs available and a remote worker is avaliable , the job is dispatched and state info is updated via db_worker
+    def __init__(self, job_queue: JobQueue, workers: list[RemoteWorkerConnection], db_worker:db.AsyncDBWorker ):
         self.job_queue = job_queue
         self.workers = workers
-        self.dispatch_interval = 1  # 250ms
+        self.dispatch_interval = DISPATCH_INTERVAL 
         self._running = True
-        self.mutex = mutex
+        self.mutex = job_queue.mutex
+        self.db_worker = db_worker
 
     async def dispatch_loop(self):
         while self._running:
             try:
-                item = await self.job_queue.dequeue_job(self.mutex)
+                item = await self.job_queue.dequeue_job()
                 if item is None:
                     await asyncio.sleep(self.dispatch_interval)
                     continue
 
-                _, _, job = item 
+                _, _, job = item
+
+                db_job = None
+                #if the datbase write was delayed for some reason
+                while db_job is None:
+                    db_job = await self.db_worker.get_job_by_id(job.job_id)
+                    if db_job is None:
+                        print(f"[DEBUG] Job could not be found in db")
+                        await asyncio.sleep(0.2)
+                        continue 
+                #Find any suitable worker
                 worker = await self._get_available_worker()
                 if not worker:
-                    # Requeue job and wait
-                    await self.job_queue.enqueue_job(job, job.priority, self.mutex)
+                    #If no worker was found re-enqueue job and wait for DISPATCH_INTERVAL
+                    await self.job_queue.enqueue_job(job, job.priority)
                     await asyncio.sleep(self.dispatch_interval)
                     continue
-
-                asyncio.create_task(self._run_job(worker, job))
+                asyncio.create_task(self._run_job(worker, db_job))
             except Exception as e:
                 print(f"[Dispatcher] Error: {e}")
                 await asyncio.sleep(self.dispatch_interval)
 
+    async def _run_job(self, worker: RemoteWorkerConnection, db_job: db.Job):
+        #ACtual job is executed via ssh from here , along with updated to state of Job(model) in database
+        job_id = db_job.job_id
+        start_time = datetime.datetime.now()
+        cmd_task = asyncio.create_task(worker.run_command(db_job.command))
 
-    async def _run_job(self, worker: RemoteWorkerConnection, job: Job):
+        # Step 1: give the task 0.5 seconds to finish on its own
+        done, pending = await asyncio.wait({cmd_task}, timeout=0.5)
+
+        # Step 2: if it didn’t finish, mark “running”
+        if cmd_task in pending:
+            db_job.status = "running"
+            db_job.started_at = start_time
+            await self.db_worker.update_job(db_job)
+            print(f"[Dispatcher] Job {job_id} running (took >0.5s)")
+
+        # Step 3: wait for actual completion (or failure)
         try:
-            print(f"[Dispatcher] Running job {job.job_id} on {worker.conn._host}")
-            output = await worker.run_command(job.command)
-            job.result = output or ""
-            job.status = "completed"
-            print(f"[Dispatcher] Job {job.job_id} completed successfully")
+            output = await cmd_task  # will re‑raise if the command failed
+            db_job.result = output or ""
+            db_job.status = "completed"
         except Exception as e:
-            job.status = "failed"
-            job.result = str(e)
-            print(f"[Worker Job Error] Job {job.job_id} failed: {e}")
+            db_job.result = str(e)
+            db_job.status = "failed"
+        finally:
+            # Always stamp the finish time and update once
+            db_job.finished_at = datetime.datetime.now()
+            db_job.updated_at = datetime.datetime.now()
+            await self.db_worker.update_job(db_job)
+            print(f"[Dispatcher] Job {job_id} done: status={db_job.status}")
+
 
     async def _get_available_worker(self) -> Optional[RemoteWorkerConnection]:
+        #Finds a worker that is alive and has available limit for atleast 1 more command
         for worker in self.workers:
             if worker.is_alive() and worker.active_commands < worker.max_commands:
                 return worker
