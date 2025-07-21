@@ -171,15 +171,26 @@ async def list_jobs():
 # Cancel a running job
 @app.delete("/jobs/{job_id}")
 async def delete_job(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
+    db_job=None
+    if db_worker!=None:
+        db_job = await db_worker.get_job_by_id(job_id)
+    if  not db_job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    if job.status in ["completed", "failed"]:
+    if db_job.status in ["completed", "failed"]:
         return {"status": "cannot cancel", "reason": f"job already {job.status}"}
 
-    job.status = "cancelled"
-    return {"status": "cancelled", "job_id": job_id}
+    #Send cancel signal 
+    if dispatcher != None:
+        cancelled:bool = await dispatcher.cancel_job(job_id)
+
+        if cancelled and db_worker!=None:
+            db_job.status = "cancelled"
+            await db_worker.update_job(db_job)
+            return {"status": "cancelled", "job_id": job_id}
+        else: 
+            raise HTTPException(status_code=404, detail="Job not running or finished")
+    
 
 # Get active logs
 @app.get("/jobs/{job_id}/logs")
