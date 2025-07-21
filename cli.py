@@ -3,32 +3,42 @@ import httpx
 import toml
 import asyncio
 from pathlib import Path
+import websockets
 
 app = typer.Typer()
+
 CONFIG_PATH = Path("config.toml")
 API_URL = "http://localhost:8000"
-DEFAULTS = {}
+API_WS_URL = "ws://localhost:8000/ws/jobs"
 
-# Load defaults from config.toml if available
+# Load defaults from config.toml
+DEFAULTS = {}
 if CONFIG_PATH.exists():
     DEFAULTS = toml.load(CONFIG_PATH)
 else:
     typer.secho("[!] config.toml not found. Defaults will not be loaded.", fg=typer.colors.YELLOW)
 
-
 @app.command()
-def submit(command: str):
+def submit(
+    command: str = typer.Argument(..., help="Shell command to run remotely"),
+    name: str = typer.Option(None, help="Job name"),
+    priority: str = typer.Option(None, help="Job priority (low, mid, high)"),
+    timeout: int = typer.Option(None, help="Timeout in seconds"),
+    retries: int = typer.Option(None, help="Number of retries"),
+    logs: bool = typer.Option(None, help="Enable live log streaming"),
+    params: str = typer.Option(None, help="Additional job parameters")
+):
     """
-    Submit a new job with optional defaults from config.toml.
+    Submit a new job to the scheduler.
     """
     payload = {
-        "name": DEFAULTS.get("name", "default-job"),
+        "name": name or DEFAULTS.get("name", "default-job"),
         "command": command,
-        "params": DEFAULTS.get("params", ""),
-        "priority": str(DEFAULTS.get("priority", "mid")),  # must be string like "high"
-        "timeout": DEFAULTS.get("timeout", 60),
-        "retries": DEFAULTS.get("retries", 0),
-        "logs": DEFAULTS.get("logs", True),
+        "params": params or DEFAULTS.get("params", ""),
+        "priority": priority or str(DEFAULTS.get("priority", "mid")),
+        "timeout": timeout if timeout is not None else DEFAULTS.get("timeout", 60),
+        "retries": retries if retries is not None else DEFAULTS.get("retries", 0),
+        "logs": logs if logs is not None else DEFAULTS.get("logs", True),
     }
 
     async def do_submit():
@@ -40,7 +50,6 @@ def submit(command: str):
                 typer.echo(response.text)
 
     asyncio.run(do_submit())
-
 
 @app.command()
 def status(job_id: str):
@@ -57,7 +66,6 @@ def status(job_id: str):
 
     asyncio.run(do_status())
 
-
 @app.command("list")
 def list_jobs():
     """
@@ -69,7 +77,6 @@ def list_jobs():
             typer.echo(response.json())
 
     asyncio.run(do_list())
-
 
 @app.command()
 def cancel(job_id: str):
@@ -83,19 +90,30 @@ def cancel(job_id: str):
 
     asyncio.run(do_cancel())
 
-
 @app.command()
 def logs(job_id: str):
     """
-    Get logs for a specific job.
+    Stream real-time logs for a specific job using WebSocket.
     """
-    async def do_logs():
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{API_URL}/jobs/{job_id}/logs")
-            typer.echo(response.json())
+    async def stream_logs():
+        uri = f"{API_WS_URL}/{job_id}/logs"
+        try:
+            async with websockets.connect(uri) as websocket:
+                typer.echo(f"Connected to job {job_id}. Streaming logs...\n")
+                while True:
+                    try:
+                        log_line = await websocket.recv()
+                        typer.echo(log_line)
+                    except websockets.exceptions.ConnectionClosedOK:
+                        typer.echo("\n[WebSocket closed gracefully]")
+                        break
+                    except websockets.exceptions.ConnectionClosedError as e:
+                        typer.echo(f"\n[WebSocket error: {e}]")
+                        break
+        except Exception as e:
+            typer.echo(f"Error connecting to WebSocket: {e}")
 
-    asyncio.run(do_logs())
-
+    asyncio.run(stream_logs())
 
 if __name__ == "__main__":
     app()
