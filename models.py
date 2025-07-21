@@ -4,13 +4,15 @@ from datetime import datetime
 
 
 class Job(SQLModel, table=True):
+    job_id: str = Field(index=True, unique=True)
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     command: str
     params: Optional[str] = None
     priority: str = Field(default="mid")
     timeout: Optional[int] = None
-    status: str = Field(default="queued")# "queued", "running", "completed", "failed", "cancelled"
+    status: str = Field(default="queued")
+    # "queued", "running", "completed", "failed", "cancelled"
     cancel_requested: bool = Field(default=False)
     logs: Optional[str] = None
     result: Optional[str] = None
