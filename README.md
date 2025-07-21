@@ -157,3 +157,8 @@ cancel
 logs                   
     Stream real-time logs for a specific job using WebSocket.
 Note: use config.toml for defaults
+
+## Requirements
+
+.env file with remote instances REMOTE_INSTANCES=[{"host": "localhost", "user": "", "password": "", "port": }]
+
