@@ -195,6 +195,7 @@ class JobDispatcher:
         self._running = True
         self.mutex = job_queue.mutex
         self.db_worker = db_worker
+        self.running_tasks: dict[str, asyncio.Task] = {}
 
     async def dispatch_loop(self):
         while self._running:
@@ -230,7 +231,9 @@ class JobDispatcher:
         #ACtual job is executed via ssh from here , along with updated to state of Job(model) in database
         job_id = db_job.job_id
         start_time = datetime.datetime.now()
-        cmd_task = asyncio.create_task(worker.run_command(db_job.command))
+        full_command = f"{db_job.command} {db_job.params}" if db_job.params else db_job.command
+        cmd_task = asyncio.create_task(worker.run_command(full_command))
+        self.running_tasks[job_id] = cmd_task
 
         # Step 1: give the task 0.5 seconds to finish on its own
         done, pending = await asyncio.wait({cmd_task}, timeout=0.5)
@@ -252,6 +255,7 @@ class JobDispatcher:
             db_job.status = "failed"
         finally:
             # Always stamp the finish time and update once
+            self.running_tasks.pop(job_id, None)
             db_job.finished_at = datetime.datetime.now()
             db_job.updated_at = datetime.datetime.now()
             await self.db_worker.update_job(db_job)
@@ -264,6 +268,17 @@ class JobDispatcher:
             if worker.is_alive() and worker.active_commands < worker.max_commands:
                 return worker
         return None
+
+    async def cancel_job(self, job_id: str) -> bool:
+        task = self.running_tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task  
+            except asyncio.CancelledError:
+                print(f"[Dispatcher] Job {job_id} cancelled")
+            return True
+        return False
 
     def stop(self):
         self._running = False
