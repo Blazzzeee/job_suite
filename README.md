@@ -156,4 +156,4 @@ cancel
 
 logs                   
     Stream real-time logs for a specific job using WebSocket.
-
+Note: use config.toml for defaults
