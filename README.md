@@ -51,7 +51,7 @@ All the data is updated in an SQLite DB for result, metrics.
 | `/jobs/{job_id}`  | GET    | Check status of a job |
 | `/jobs`           | GET    | List all jobs         |
 | `/jobs/{job_id}`  | DELETE | Cancel a job          |
-| `/jobs/{id}/logs` | GET    | Fetch job logs        |
+| `ws/jobs/{id}/logs` | GET    | Fetch job logs        |
 
 **-- Status: done**
 
@@ -133,7 +133,7 @@ Sync mechanism -> usage of a mutex lock that serves as access to physical databa
 ## Solution used (Solution 4)-> AyncDBWorker class (present in db.py)
 
 # RemoteInstances
-
+ -- Remaining
 
 
 # CLI usage 
