@@ -1,4 +1,4 @@
-The first part would be a webserver which listens to incoming job requests
+The first part would be a webserver which listens to incoming job requests \n
 **-- desc server**
 The server is a FastAPI server that listens onto oncoming job requests. The job requests are sent via a CLI which
 can include various information like priority, timeouts, retries, display logs, (more to add).
@@ -93,5 +93,13 @@ So, while the GIL means we don't get true parallelism for CPU-bound tasks, it's 
 
 # Scheduler
 
+The task scheduler should expose an API to enqueue and dequeue jobs as a Priority Queue as well as perform this in an async manner to not block the Server , and other parts .
+The async behaviour of scheduler adds a race condition , consider a case when a user does a POST , our post {job_id} controller should be
+responsible for the enqueue , and passes an async coroutine enqueue_job , but before that operation could finish another reequest arrives 
+assuming the CPU was doing a expensive operation like a memory lookup like PriorityQueue field , then it is almost certain that the contoller would get CPU access , then if the another POST by user leads to a similar enqueue and then it again goes into poll for memory lookup and 
+our previous enqueue takes place again , and completes , then the 2nd request completes the first request buffer write is lost
 
-
+## solution
+Usage of a mutex_lock , the queue mutex shall be locked via each enqueue and dequeue to ensure that these operations are atomic , altho 
+another request can break atomicity for this operation , but this request if it causes a race condition would certainly use our JobQueue api
+then this mutex shall lock the other request operation to safeguard our JobQueue
