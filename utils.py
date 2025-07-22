@@ -11,7 +11,7 @@ from environs import env
 import json
 import db
 import datetime
-
+from fastapi import WebSocket
 
 #Constants
 MAX_COMMANDS = 5
@@ -143,7 +143,7 @@ class RemoteWorkerConnection:
         self.alive = True
         print(f"[INFO] Conneceted to remote worker")
 
-    async def run_command(self, cmd: str, on_line=None, capture_output: bool = True):
+    async def run_command(self, cmd: str, on_line=None, capture_output: bool = False):
         #This command is used by Dispatcher to dispatch shell compatible commands, it allows access to real time logs via WebSocket
         async with self.lock:
             if not self.is_alive():
@@ -196,6 +196,8 @@ class JobDispatcher:
         self.mutex = job_queue.mutex
         self.db_worker = db_worker
         self.running_tasks: dict[str, asyncio.Task] = {}
+        self.log_streams: dict[str, list[WebSocket]] = {}
+        self.log_buffers: dict[str, list[str]] = {}
 
     async def dispatch_loop(self):
         while self._running:
@@ -228,33 +230,51 @@ class JobDispatcher:
                 await asyncio.sleep(self.dispatch_interval)
 
     async def _run_job(self, worker: RemoteWorkerConnection, db_job: db.Job):
-        #ACtual job is executed via ssh from here , along with updated to state of Job(model) in database
         job_id = db_job.job_id
         start_time = datetime.datetime.now()
         full_command = f"{db_job.command} {db_job.params}" if db_job.params else db_job.command
-        cmd_task = asyncio.create_task(worker.run_command(full_command))
+
+        # Set up log streaming if enabled
+        async def stream_log_line(line: str):
+            self.log_buffers[job_id].append(line)
+            clients = self.log_streams.get(job_id, [])
+            for ws in clients:
+                try:
+                    await ws.send_text(line)
+                except Exception:
+                    pass  # TODO: Clean up disconnected clients
+
+        on_line = stream_log_line if db_job.logs else None
+        capture_output = True
+
+        # Create the actual task
+        cmd_task = asyncio.create_task(
+            worker.run_command(full_command, on_line=on_line, capture_output=capture_output)
+        )
         self.running_tasks[job_id] = cmd_task
 
-        # Step 1: give the task 0.5 seconds to finish on its own
+        # Mark "running" if still alive after 0.5s
         done, pending = await asyncio.wait({cmd_task}, timeout=0.5)
-
-        # Step 2: if it didn’t finish, mark “running”
         if cmd_task in pending:
             db_job.status = "running"
             db_job.started_at = start_time
             await self.db_worker.update_job(db_job)
             print(f"[Dispatcher] Job {job_id} running (took >0.5s)")
 
-        # Step 3: wait for actual completion (or failure)
         try:
-            output = await cmd_task  # will re‑raise if the command failed
+            # ENFORCE TIMEOUT
+            output = await asyncio.wait_for(cmd_task, timeout=db_job.timeout)
             db_job.result = output or ""
             db_job.status = "completed"
+        except asyncio.TimeoutError:
+            cmd_task.cancel()
+            db_job.result = "Job timed out"
+            db_job.status = "timeout"
+            print(f"[Dispatcher] Job {job_id} timed out after {db_job.timeout}s")
         except Exception as e:
             db_job.result = str(e)
             db_job.status = "failed"
         finally:
-            # Always stamp the finish time and update once
             self.running_tasks.pop(job_id, None)
             db_job.finished_at = datetime.datetime.now()
             db_job.updated_at = datetime.datetime.now()

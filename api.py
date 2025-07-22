@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException,WebSocketDisconnect, WebSocket
 from contextlib import asynccontextmanager
 import uuid
 import uvicorn
@@ -86,10 +86,11 @@ async def post_job(job: utils.JobRequest):
     #Unique refernce used for cross mapping of memory and database
     job_id = str(uuid.uuid4())
     #The job instance is the in memory validated job_request
-    job_instance = utils.Job(job_id, job)
 
     try: 
         #job_db_instance is the Job model used for persitent storage
+
+        job_instance = utils.Job(job_id, job)
         db_job_instance = models.Job(
                 job_id=str(job_id),
                 name=job.name,
@@ -99,10 +100,9 @@ async def post_job(job: utils.JobRequest):
                 timeout=job.timeout,
                 status="queued",
             )
-    except Exception as e:
+    except ValueError as ve:
         #Occurs if any field is invalid
-        print(f"Recived invalid request {e}")
-        raise HTTPException(status_code=400, detail="Invalid argument (invalid request payload)") 
+        raise HTTPException(status_code=404, detail=str(ve)) 
 
     try:
         if queue!=None and db_worker!=None and queue_mutex!=None:
@@ -127,23 +127,24 @@ async def post_job(job: utils.JobRequest):
 # Get current state of job using job id
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str):
-    if db_worker != None:
-        job = await db_worker.get_job_by_id(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
+    if db_worker is None:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-        return {
-            "job_id": job.job_id,
-            "command": job.command,
-            "params": job.params,
-            "priority": job.priority,
-            "timeout": job.timeout,
-            "status": job.status,
-            "result": job.result,
-            "started_at":job.started_at,
-            "finished_at": job.finished_at
-        }
+    job = await db_worker.get_job_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
+    return {
+        "job_id":     job.job_id,
+        "command":    job.command,
+        "params":     job.params,
+        "priority":   job.priority,
+        "timeout":    job.timeout,
+        "status":     job.status,
+        "result":     job.result,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+    }
 # Get list of all running jobs
 @app.get("/jobs/")
 async def list_jobs():
@@ -192,25 +193,36 @@ async def delete_job(job_id: str):
             raise HTTPException(status_code=404, detail="Job not running or finished")
     
 
-# Get active logs
-@app.get("/jobs/{job_id}/logs")
-async def get_logs(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+@app.websocket("/ws/jobs/{job_id}/logs")
+async def job_logs_ws(websocket: WebSocket, job_id: str):
+    await websocket.accept()
 
-    if not job.logs:
-        return {"logs": "Logs were not requested for this job."}
+    # Validate job exists 
+    db_job = await dispatcher.db_worker.get_job_by_id(job_id)
+    if not db_job:
+        await websocket.close(code=1008)  # Policy Violation
+        return
 
-    # HARDCODED
-    return {
-        "job_id": job_id,
-        "logs": [
-            "Starting execution...",
-            "Processing...",
-            "Finished successfully."
-        ]
-    }
+    if dispatcher!=None:
+        # Register WebSocket client
+        if job_id not in dispatcher.log_streams:
+            dispatcher.log_streams[job_id] = []
+        if job_id not in dispatcher.log_buffers:
+            dispatcher.log_buffers[job_id] = []
 
+        dispatcher.log_streams[job_id].append(websocket)
+
+        # Optionally send buffered logs if available
+        for line in dispatcher.log_buffers[job_id]:
+            try:
+                await websocket.send_text(line)
+            except Exception:
+                pass
+
+        try:
+            while True:
+                await websocket.receive_text()  # keep connection open
+        except WebSocketDisconnect:
+            dispatcher.log_streams[job_id].remove(websocket)
 if __name__ == "__main__":
     uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
