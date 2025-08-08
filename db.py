@@ -1,15 +1,16 @@
 import asyncio
+from typing import List, Sequence
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
+from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from models import Job
-from sqlmodel import select
-from typing import List
 
 class AsyncDBWorker:
     def __init__(self, session: AsyncSession, mutex: asyncio.Lock):
-        self.session = session
         self.mutex = mutex
         self.task_queue: asyncio.Queue = asyncio.Queue()
         self._running = False
+        self.session=None
 
     async def run(self):
         self._running = True
@@ -19,6 +20,7 @@ class AsyncDBWorker:
                 action, job = await self.task_queue.get()
                 print(f"[AsyncDBWorker] Received task: {action.upper()} for job: {job}")
 
+                self.session = await init_db()
                 if action == "add":
                     self.session.add(job)
                     await self.session.commit()
@@ -60,8 +62,17 @@ class AsyncDBWorker:
                 result = await self.session.exec(stmt)
                 return result.first()
 
-    async def get_all_jobs(self) -> List[Job]:
-        # Return all jobs in the DB            async with self.mutex:
+    async def get_running_cancellable_jobs(self) -> Sequence[Job]:
+        await self.mutex.acquire() 
+        try:
+                stmt = select(Job).where(Job.status == "running", Job.cancellable == True)
+                result = await self.session.exec(stmt)
+                return result.all()
+        finally:
+            self.mutex.release()
+
+    async def get_all_jobs(self) -> Sequence[Job]:
+        # Return all jobs in the DB      
         async with self.mutex:
                 stmt = select(Job)
                 result = await self.session.exec(stmt)
@@ -71,3 +82,16 @@ class AsyncDBWorker:
         print("[AsyncDBWorker] Stop signal received.")
         self._running = False
         await self.task_queue.put(("stop", None))
+
+
+
+async def init_db() -> AsyncSession:
+    # Initializes the SQLite database and returns a session.
+    # Only DBWorker shall this session.
+    DATABASE_URL = "sqlite+aiosqlite:///jobs.db"  
+    engine:AsyncEngine = create_async_engine(DATABASE_URL, echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    session = AsyncSession(engine)
+    print("[DB] Initialized and async session created")
+    return session
