@@ -51,8 +51,11 @@ async def lifespan(app: FastAPI):
     dispatcher_task = asyncio.create_task(dispatcher.dispatch_loop())
 
     yield 
+    
+    # GRACEFULL SHUTDOWN
+    await dispatcher.gracefull_shutdown()
+    
 
-    # SHUTDOWN
     if db_worker:
         #terminate database worker
         await db_worker.stop()
@@ -99,6 +102,8 @@ async def post_job(job: utils.JobRequest):
                 priority=job.priority,
                 timeout=job.timeout,
                 status="queued",
+                cancellable = job.cancellable
+                
             )
     except ValueError as ve:
         #Occurs if any field is invalid
@@ -224,5 +229,7 @@ async def job_logs_ws(websocket: WebSocket, job_id: str):
                 await websocket.receive_text()  # keep connection open
         except WebSocketDisconnect:
             dispatcher.log_streams[job_id].remove(websocket)
+
+
 if __name__ == "__main__":
-    uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("api:app", host="localhost", port=8000, reload=True)
