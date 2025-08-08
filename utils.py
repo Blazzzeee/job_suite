@@ -37,6 +37,7 @@ class JobRequest(BaseModel):
     timeout: Optional[int] = 60
     retries: Optional[int] = 0
     logs: Optional[bool] = False
+    cancellable:bool = False
 
 # Actual job representation in-memory
 class Job:
@@ -60,6 +61,7 @@ class Job:
         self.logs = request.logs
         self.status = "queued"
         self.result:str = " "
+        self.cancelable:bool=request.cancellable
 
     def __repr__(self):
         return f"<Job {self.job_id}: {self.command}>"
@@ -202,6 +204,13 @@ class JobDispatcher:
     async def dispatch_loop(self):
         while self._running:
             try:
+                # Find an worker
+                worker = await self._get_available_worker()
+                if not worker:
+                    await asyncio.sleep(self.dispatch_interval)
+                    continue
+
+                # dequeue if there was a worker
                 item = await self.job_queue.dequeue_job()
                 if item is None:
                     await asyncio.sleep(self.dispatch_interval)
@@ -209,25 +218,22 @@ class JobDispatcher:
 
                 _, _, job = item
 
+                # DB lookup
                 db_job = None
-                #if the datbase write was delayed for some reason
                 while db_job is None:
                     db_job = await self.db_worker.get_job_by_id(job.job_id)
                     if db_job is None:
                         print(f"[DEBUG] Job could not be found in db")
                         await asyncio.sleep(0.2)
-                        continue 
-                #Find any suitable worker
-                worker = await self._get_available_worker()
-                if not worker:
-                    #If no worker was found re-enqueue job and wait for DISPATCH_INTERVAL
-                    await self.job_queue.enqueue_job(job, job.priority)
-                    await asyncio.sleep(self.dispatch_interval)
-                    continue
+                        continue
+
+                #Dispatch job via asyncssh
                 asyncio.create_task(self._run_job(worker, db_job))
+
             except Exception as e:
                 print(f"[Dispatcher] Error: {e}")
                 await asyncio.sleep(self.dispatch_interval)
+
 
     async def _run_job(self, worker: RemoteWorkerConnection, db_job: db.Job):
         job_id = db_job.job_id
@@ -290,6 +296,7 @@ class JobDispatcher:
         return None
 
     async def cancel_job(self, job_id: str) -> bool:
+        # Tell the remote client to cancel the job
         task = self.running_tasks.get(job_id)
         if task and not task.done():
             task.cancel()
@@ -302,3 +309,30 @@ class JobDispatcher:
 
     def stop(self):
         self._running = False
+
+
+
+    async def gracefull_shutdown(self):
+        # query all the running jobs , which are cancellable 
+        # Dispatch a cancel event to remote instance
+        # Wait for every task to get cancelled
+
+        print("[DISPATCHER] Graceful shutdown initiated...")
+        for job_id, task in list(self.running_tasks.items()):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    print(f"[DISPATCHER] Job cancelled due to shutdown")
+                    db_job = await self.db_worker.get_job_by_id(job_id)
+                    if db_job:
+                        db_job.status = "cancelled"
+                        db_job.result = "Job cancelled due to shutdown"
+                        db_job.finished_at = datetime.datetime.now()
+                        db_job.updated_at = datetime.datetime.now()
+                        await self.db_worker.update_job(db_job)
+                    return True
+                return False
+
+        
