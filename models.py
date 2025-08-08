@@ -20,6 +20,7 @@ class Job(SQLModel, table=True):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     updated_at: datetime = Field(default_factory=datetime.now)
+    cancellable:bool = False
 
     def __repr__(self):
         return f"<Job id={self.id} name={self.name} status={self.status} priority={self.priority}>"
