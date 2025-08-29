@@ -133,8 +133,12 @@ Sync mechanism -> usage of a mutex lock that serves as access to physical databa
 ## Solution used (Solution 4)-> AyncDBWorker class (present in db.py)
 
 # RemoteInstances
- -- Remaining
 
+The remote instance is a ssh wrapper provided by paramiko in python , this solves a proble of having a sort of mediator at the remote worker since
+which should be responsible for exposing a safe API that should communicate the JobQueue server , allow job dispatch , cancellation , capture logs and more
+, and this would also need to be secure , a API for server to communicate and a completely seperate program , from a different perspective ssh already allows 
+all this at a basic level , so we are using paramiko which is complete ssh implementation . the remote worker is Implemeted as a wrapper around this 
+to allow job dispatch keeping track of jobs , and hold onto state information of all this . So our remote workers need minimal configuration now only expose a ssh connection using RSA key
 
 # CLI usage 
 Usage: cli.py [OPTIONS] COMMAND [ARGS]...
