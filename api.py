@@ -24,13 +24,12 @@ async def lifespan(app: FastAPI):
     queue_mutex = asyncio.Lock()
     queue = utils.JobQueue(queue_mutex)
 
-    #Depedency creation
-    session = await utils.init_db()
     
     #The db_mutex safeguards all writes to database file and is used in every read/write operation involving db
     db_mutex = asyncio.Lock()
     #The db worker is responsible for all operations involving database updates
-    db_worker = db.AsyncDBWorker(session=session, mutex=db_mutex)
+    db_worker = db.AsyncDBWorker(mutex=db_mutex)
+    await db_worker.init_db_engine()
     #The worker task is actual async task , in which db_worker operations are executed from
     worker_task = asyncio.create_task(db_worker.run())
     print("[INFO] Database worker started")

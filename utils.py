@@ -12,6 +12,7 @@ import json
 import db
 import datetime
 from fastapi import WebSocket
+import sys
 
 #Constants
 MAX_COMMANDS = 5
@@ -97,19 +98,6 @@ class JobQueue:
             return None
         finally:
             self.mutex.release()
-
-#Depedency Creation
-async def init_db() -> AsyncSession:
-    # Initializes the SQLite database and returns a session.
-    # Only DBWorker shall this session.
-    DATABASE_URL = "sqlite+aiosqlite:///jobs.db"  
-    engine:AsyncEngine = create_async_engine(DATABASE_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
-    session = AsyncSession(engine)
-    print("[DB] Initialized and async session created")
-    return session
-
 
 
 async def connect_instance(instance):
@@ -227,6 +215,7 @@ class JobDispatcher:
                         await asyncio.sleep(0.2)
                         continue
 
+                sys.stdout.flush()
                 #Dispatch job via asyncssh
                 asyncio.create_task(self._run_job(worker, db_job))
 
