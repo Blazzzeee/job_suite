@@ -2,9 +2,6 @@ import asyncio
 import asyncssh
 from asyncio import PriorityQueue 
 import itertools
-from sqlmodel import SQLModel
-from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from pydantic import BaseModel
 from typing import Optional
 from environs import env
@@ -13,15 +10,16 @@ import db
 import datetime
 from fastapi import WebSocket
 import sys
+import logging
 
 #Constants
-MAX_COMMANDS = 5
+MAX_COMMANDS = 1000
 env.read_env()
 raw_instances=env.str("REMOTE_INSTANCES")
 try:
     REMOTE_INSTANCES: list[dict] = json.loads(raw_instances)
 except json.JSONDecodeError as e:
-    print(f"Could not interpret remote instances check your .env file properly {e}")
+    logging.info(f"Could not interpret remote instances check your .env file properly {e}")
 PRIORITY_LEVELS = {
             "high":0,
             "mid":5,
@@ -83,7 +81,7 @@ class JobQueue:
         await self.mutex.acquire()
         try:
             await self.main_queue.put((PRIORITY_LEVELS[priority], next(self.counter), job))
-            print(f"[DEBUG] Item {job} enqueued with priority: {priority}")
+            logging.info(f"[DEBUG] Item {job} enqueued with priority: {priority}")
         finally:
             self.mutex.release()
 
@@ -94,7 +92,7 @@ class JobQueue:
             job_instance = await asyncio.wait_for(self.main_queue.get(), timeout=1)
             return job_instance
         except Exception as e:
-            print(f"[Queue Empty] {e}")
+            logging.info(f"[Queue Empty] {e}")
             return None
         finally:
             self.mutex.release()
@@ -110,10 +108,10 @@ async def connect_instance(instance):
             password=instance.get("password"),  
             known_hosts=None,
         )
-        print(f"[INSTANCE] Connected to {instance['host']}")
+        logging.info(f"[INSTANCE] Connected to {instance['host']}")
         return conn
     except Exception as e:
-        print(f"[INSTANCE] Failed to connect to {instance['host']}: {e}")
+        logging.info(f"[INSTANCE] Failed to connect to {instance['host']}: {e}")
         return None
 
 async def connect_remote_instances():
@@ -131,7 +129,8 @@ class RemoteWorkerConnection:
         self.active_commands = 0
         self.lock = asyncio.Lock()
         self.alive = True
-        print(f"[INFO] Conneceted to remote worker")
+
+        logging.info(f"[INFO] Conneceted to remote worker")
 
     async def run_command(self, cmd: str, on_line=None, capture_output: bool = False):
         #This command is used by Dispatcher to dispatch shell compatible commands, it allows access to real time logs via WebSocket
@@ -155,8 +154,11 @@ class RemoteWorkerConnection:
             if process.exit_status != 0:
                 raise RuntimeError(f"Command failed with exit code {process.exit_status}: {cmd}")
             return output if not on_line else None
-        except (asyncssh.ConnectionLost, BrokenPipeError, OSError):
+
+        except Exception as e:
+            logging.error(e)
             self.alive = False
+            await connect_remote_instances()
             raise e
         finally:
             async with self.lock:
@@ -211,7 +213,7 @@ class JobDispatcher:
                 while db_job is None:
                     db_job = await self.db_worker.get_job_by_id(job.job_id)
                     if db_job is None:
-                        print(f"[DEBUG] Job could not be found in db")
+                        logging.info(f"[DEBUG] Job could not be found in db")
                         await asyncio.sleep(0.2)
                         continue
 
@@ -220,7 +222,7 @@ class JobDispatcher:
                 asyncio.create_task(self._run_job(worker, db_job))
 
             except Exception as e:
-                print(f"[Dispatcher] Error: {e}")
+                logging.info(f"[Dispatcher] Error: {e}")
                 await asyncio.sleep(self.dispatch_interval)
 
 
@@ -254,7 +256,7 @@ class JobDispatcher:
             db_job.status = "running"
             db_job.started_at = start_time
             await self.db_worker.update_job(db_job)
-            print(f"[Dispatcher] Job {job_id} running (took >0.5s)")
+            logging.info(f"[Dispatcher] Job {job_id} running (took >0.5s)")
 
         try:
             # ENFORCE TIMEOUT
@@ -265,7 +267,7 @@ class JobDispatcher:
             cmd_task.cancel()
             db_job.result = "Job timed out"
             db_job.status = "timeout"
-            print(f"[Dispatcher] Job {job_id} timed out after {db_job.timeout}s")
+            logging.info(f"[Dispatcher] Job {job_id} timed out after {db_job.timeout}s")
         except Exception as e:
             db_job.result = str(e)
             db_job.status = "failed"
@@ -274,7 +276,7 @@ class JobDispatcher:
             db_job.finished_at = datetime.datetime.now()
             db_job.updated_at = datetime.datetime.now()
             await self.db_worker.update_job(db_job)
-            print(f"[Dispatcher] Job {job_id} done: status={db_job.status}")
+            logging.info(f"[Dispatcher] Job {job_id} done: status={db_job.status}")
 
 
     async def _get_available_worker(self) -> Optional[RemoteWorkerConnection]:
@@ -292,7 +294,7 @@ class JobDispatcher:
             try:
                 await task  
             except asyncio.CancelledError:
-                print(f"[Dispatcher] Job {job_id} cancelled")
+                logging.info(f"[Dispatcher] Job {job_id} cancelled")
             return True
         return False
 
@@ -306,14 +308,14 @@ class JobDispatcher:
         # Dispatch a cancel event to remote instance
         # Wait for every task to get cancelled
 
-        print("[DISPATCHER] Graceful shutdown initiated...")
+        logging.info("[DISPATCHER] Graceful shutdown initiated...")
         for job_id, task in list(self.running_tasks.items()):
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
-                    print(f"[DISPATCHER] Job cancelled due to shutdown")
+                    logging.info(f"[DISPATCHER] Job cancelled due to shutdown")
                     db_job = await self.db_worker.get_job_by_id(job_id)
                     if db_job:
                         db_job.status = "cancelled"

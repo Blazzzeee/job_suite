@@ -25,6 +25,16 @@ services:
     networks:
       - mynet
 
+  postgres-db:
+    image: postgres:15
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: worker
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: jobs
+    networks:
+      - mynet
+
 networks:
   mynet:
     driver: bridge

@@ -1,9 +1,10 @@
 import asyncio
-from typing import List, Sequence
+from typing import Sequence
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
-from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from models import Job
+from sqlmodel import SQLModel, select
+import logging
 
 class AsyncDBWorker:
     def __init__(self, mutex: asyncio.Lock):
@@ -15,35 +16,35 @@ class AsyncDBWorker:
 
     async def run(self):
         self._running = True
-        print("[AsyncDBWorker] Worker started.")
+        logging.info("[AsyncDBWorker] Worker started.")
         while self._running:
             try:
                 action, job = await self.task_queue.get()
-                print(f"[AsyncDBWorker] Received task: {action.upper()} for job: {job}")
+                logging.info(f"[AsyncDBWorker] Received task: {action.upper()} for job: {job}")
 
                 async with AsyncSession(self.engine) as session:
                     if action == "add":
                         session.add(job)
                         await session.commit()
                         await session.refresh(job)
-                        print(f"[AsyncDBWorker] Job added to DB: {job}")
+                        logging.info(f"[AsyncDBWorker] Job added to DB: {job}")
                     elif action == "update":
                         await session.merge(job)
                         await session.commit()
-                        print(f"[AsyncDBWorker] Job updated in DB: {job}")
+                        logging.info(f"[AsyncDBWorker] Job updated in DB: {job}")
                     elif action == "stop":
-                        print("[AsyncDBWorker] Received stop signal.")
+                        logging.info("[AsyncDBWorker] Received stop signal.")
                         break
 
             except Exception as e:
-                print(f"[AsyncDBWorker] Error during DB operation: {e}")
+                logging.info(f"[AsyncDBWorker] Error during DB operation: {e}")
 
-        print("[AsyncDBWorker] Worker stopping.")
+        logging.info("[AsyncDBWorker] Worker stopping.")
 
     async def add_job(self, job: Job):
         await self.mutex.acquire()
         try:
-            print(f"[AsyncDBWorker] Queuing job for ADD: {job}")
+            logging.info(f"[AsyncDBWorker] Queuing job for ADD: {job}")
             await self.task_queue.put(("add", job))
         finally:
             self.mutex.release()
@@ -51,7 +52,7 @@ class AsyncDBWorker:
     async def update_job(self, job: Job):
         await self.mutex.acquire()
         try:
-            print(f"[AsyncDBWorker] Queuing job for UPDATE: {job}")
+            logging.info(f"[AsyncDBWorker] Queuing job for UPDATE: {job}")
             await self.task_queue.put(("update", job))
         finally:
             self.mutex.release()
@@ -82,7 +83,7 @@ class AsyncDBWorker:
                 return result.all()
 
     async def stop(self):
-        print("[AsyncDBWorker] Stop signal received.")
+        logging.info("[AsyncDBWorker] Stop signal received.")
         self._running = False
         await self.task_queue.put(("stop", None))
 
@@ -91,7 +92,17 @@ class AsyncDBWorker:
     async def init_db_engine(self) -> AsyncEngine:
         # Initializes the SQLite database and returns a session.
         # Only DBWorker shall this session.
-        DATABASE_URL = "sqlite+aiosqlite:///jobs.db"  
-        engine:AsyncEngine = create_async_engine(DATABASE_URL, echo=False)
-        self.engine = engine
+        for i in range(10):
+            try:
+                DATABASE_URL = "postgresql+asyncpg://worker:test@postgres-db/jobs"
+                engine:AsyncEngine = create_async_engine(DATABASE_URL, echo=False)
+                self.engine = engine
 
+                async with engine.begin() as conn:
+                    await conn.run_sync(SQLModel.metadata.create_all)
+                return engine
+
+            # Allow postgres to setup                
+            except Exception as e:
+                logging.info(f"[AsyncDBWorker error : {e}]")
+                await asyncio.sleep(1)

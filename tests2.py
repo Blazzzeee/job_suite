@@ -5,7 +5,7 @@ BASE_URL = "http://127.0.0.1:8000"
 def make_payload(i: int):
     return {
         "name": f"append line {i}",
-        "command": f"sleep 5; echo {i} >> test.txt",
+        "command": f"sleep 10; echo {i} >> test.txt",
         "params": "",
         "priority": "high",
         "timeout": 30,

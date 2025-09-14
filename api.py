@@ -6,6 +6,7 @@ import utils
 import models
 import db
 import asyncio
+import logging
 
 db_worker = None
 remote_workers = []
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
     await db_worker.init_db_engine()
     #The worker task is actual async task , in which db_worker operations are executed from
     worker_task = asyncio.create_task(db_worker.run())
-    print("[INFO] Database worker started")
+    logging.info("[INFO] Database worker started")
 
     #This routine connects to all remote instances that are defined in an env file and return successfull connections in a list
     connections = await utils.connect_remote_instances()
@@ -43,7 +44,7 @@ async def lifespan(app: FastAPI):
             remote_conn=utils.RemoteWorkerConnection(conn)
             remote_workers.append(remote_conn) 
         except Exception as e:
-            print(e)
+            logging.info(e)
 
     #The dispatcher performs dequeues and allots task to remote instances 
     dispatcher=utils.JobDispatcher(job_queue=queue, workers=remote_workers, db_worker=db_worker)
@@ -58,19 +59,19 @@ async def lifespan(app: FastAPI):
     if db_worker:
         #terminate database worker
         await db_worker.stop()
-        print("[INFO] Database worker stopped")
+        logging.info("[INFO] Database worker stopped")
     #Terminate asuny task for db_wroker
     worker_task.cancel()
     for worker in remote_workers:
         try:
             await worker.close()
             #Nicely free up remote workers
-            print("[INFO] Disconnected from remote worker")
+            logging.info("[INFO] Disconnected from remote worker")
         except Exception as e:
-            print(f"[WARN] Failed to close remote connection: {e}")
+            logging.info(f"[WARN] Failed to close remote connection: {e}")
 
     dispatcher.stop()
-    print(f"[INFO] Stopping dispatcher")
+    logging.info(f"[INFO] Stopping dispatcher")
     await asyncio.sleep(0.3) 
 
 
@@ -114,11 +115,11 @@ async def post_job(job: utils.JobRequest):
             await db_worker.add_job(db_job_instance)
             await queue.enqueue_job(job_instance, job_instance.priority)
     except ValueError as e:
-        print(f"[DEBUG]Cannot enqueue job .. skipping ... {e}")
+        logging.info(f"[DEBUG]Cannot enqueue job .. skipping ... {e}")
     except Exception as e:
-        print(f"[ERROR]Unknown error occurred")
+        logging.info(f"[ERROR]Unknown error occurred")
 
-    print(f"[DEBUG] New job queued {job_instance}")
+    logging.info(f"[DEBUG] New job queued {job_instance}")
 
     return {
         "status": "submitted",
@@ -231,4 +232,10 @@ async def job_logs_ws(websocket: WebSocket, job_id: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    logging.basicConfig(
+        filename="fastapi.log",   # Log file
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )    
+
+    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=False)
