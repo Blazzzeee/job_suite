@@ -13,7 +13,7 @@ import sys
 import logging
 
 #Constants
-MAX_COMMANDS = 1000
+MAX_COMMANDS = 100
 env.read_env()
 raw_instances=env.str("REMOTE_INSTANCES")
 try:

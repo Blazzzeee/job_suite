@@ -16,7 +16,8 @@ RUN mkdir /var/run/sshd && \
 
 # Allow password-based login
 RUN sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
-    sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config && \
+    echo "MaxSessions 100000" >> /etc/ssh/sshd_config
 
 # Expose SSH port
 EXPOSE 22

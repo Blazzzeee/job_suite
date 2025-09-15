@@ -23,7 +23,7 @@ def test_post_job():
     assert response.status_code == 201, f"Request failed: {response.text}"
 
 def test_race_condition():
-    for i in range(100):
+    for i in range(1000):
         headers = {"Content-Type": "application/json"}
         response = httpx.post(f"{BASE_URL}/jobs/", json=make_payload(i), headers=headers)
 
